@@ -1,16 +1,68 @@
+//! Manage a group of tasks on a runtime.
+//!
+//! Enables cancellation to be propagated across tasks, and ensures if an error
+//! occurs that all sibling tasks in the group are cancelled too.
+//!
+//! # Examples
+//!
+//! We can process streams in a loop without creating any dangling tasks:
+//!
+//! ```
+//! use async_std::io;
+//! use async_std::net::{TcpListener, TcpStream};
+//! use async_std::prelude::*;
+//! use async_std::task;
+//!
+//! async fn process(stream: TcpStream) -> io::Result<()> {
+//!     println!("Accepted from: {}", stream.peer_addr()?);
+//!
+//!     let mut reader = stream.clone();
+//!     let mut writer = stream;
+//!     io::copy(&mut reader, &mut writer).await?;
+//!
+//!     Ok(())
+//! }
+//!
+//! #[async_std::main]
+//! fn main() -> io::Result<()> {
+//!     let listener = TcpListener::bind("127.0.0.1:8080").await?;
+//!     println!("Listening on {}", listener.local_addr()?);
+//!
+//!     let handle = task_group::group(|group| async move {
+//!         let mut incoming = listener.incoming();
+//!         while let Some(stream) = incoming.next().await {
+//!             let stream = stream?;
+//!             group.spawn(async move { process(stream).await });
+//!         }
+//!         Ok(())
+//!     });
+//!     handle.await?;
+//!     Ok(())
+//! }
+//! ```
+
+#![deny(missing_debug_implementations, nonstandard_style)]
+#![warn(missing_docs, unreachable_pub)]
+
 use async_channel::{self, Receiver, Sender};
+
+use async_global_executor::Task;
+use async_std::task::{Context, Poll};
+use core::future::Future;
+use core::pin::Pin;
 use futures_core::Stream;
-use std::any::Any;
-use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll};
-use tokio::task::JoinHandle as TokioJoinHandle;
 
 /// A TaskGroup is used to spawn a collection of tasks. The collection has two properties:
 /// * if any task returns an error or panicks, all tasks are terminated.
 /// * if the `JoinHandle` returned by `group` is dropped, all tasks are terminated.
 pub struct TaskGroup<E> {
     new_task: Sender<ChildHandle<E>>,
+}
+
+impl<E> std::fmt::Debug for TaskGroup<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaskGroup").finish_non_exhaustive()
+    }
 }
 // not the derived impl: E does not need to be Clone
 impl<E> Clone for TaskGroup<E> {
@@ -41,10 +93,9 @@ impl<E: Send + 'static> TaskGroup<E> {
     where
         F: Future<Output = Result<(), E>> + Send + 'static,
     {
-        let name = "blank".to_owned();
-        let join = tokio::task::spawn(f);
+        let join = async_global_executor::spawn(f);
         self.new_task
-            .try_send(ChildHandle { name, join })
+            .try_send(ChildHandle { join })
             .expect("Sending a task to the channel failed");
     }
 
@@ -53,10 +104,9 @@ impl<E: Send + 'static> TaskGroup<E> {
     where
         F: Future<Output = Result<(), E>> + 'static,
     {
-        let name = "blank".to_owned();
-        let join = tokio::task::spawn_local(f);
+        let join = async_global_executor::spawn_local(f);
         self.new_task
-            .try_send(ChildHandle { name, join })
+            .try_send(ChildHandle { join })
             .expect("Sending a task to the channel failed");
     }
 
@@ -66,27 +116,22 @@ impl<E: Send + 'static> TaskGroup<E> {
     }
 }
 
+#[derive(Debug)]
 struct ChildHandle<E> {
-    name: String,
-    join: TokioJoinHandle<Result<(), E>>,
+    join: Task<Result<(), E>>,
 }
 
 impl<E> ChildHandle<E> {
     // Pin projection. Since there is only this one required, avoid pulling in the proc macro.
-    fn pin_join(self: Pin<&mut Self>) -> Pin<&mut TokioJoinHandle<Result<(), E>>> {
+    fn pin_join(self: Pin<&mut Self>) -> Pin<&mut Task<Result<(), E>>> {
         unsafe { self.map_unchecked_mut(|s| &mut s.join) }
-    }
-    fn cancel(&mut self) {
-        self.join.abort();
     }
 }
 
 // As a consequence of this Drop impl, when a JoinHandle is dropped, all of its children will be
 // canceled.
 impl<E> Drop for ChildHandle<E> {
-    fn drop(&mut self) {
-        self.cancel()
-    }
+    fn drop(&mut self) {}
 }
 
 /// A JoinHandle is used to manage a collection of tasks. There are two
@@ -99,6 +144,7 @@ impl<E> Drop for ChildHandle<E> {
 /// (terminated). So, if you use a combinator like
 /// `tokio::time::timeout(duration, task_manager).await`, all tasks will be
 /// terminated if the timeout occurs.
+#[derive(Debug)]
 pub struct JoinHandle<E> {
     channel: Option<Receiver<ChildHandle<E>>>,
     children: Vec<Pin<Box<ChildHandle<E>>>>,
@@ -114,7 +160,7 @@ impl<E> JoinHandle<E> {
 }
 
 impl<E> Future for JoinHandle<E> {
-    type Output = Result<(), RuntimeError<E>>;
+    type Output = Result<(), E>;
     fn poll(mut self: Pin<&mut Self>, ctx: &mut Context) -> Poll<Self::Output> {
         let mut s = self.as_mut();
 
@@ -158,26 +204,12 @@ impl<E> Future for JoinHandle<E> {
                 // Child returns successfully: remove it from children.
                 // Then execute the loop body again with ix unchanged, because
                 // last element was swapped into child_ix.
-                Poll::Ready(Ok(Ok(()))) => {
+                Poll::Ready(Ok(())) => {
                     let _ = s.children.swap_remove(child_ix);
                 }
                 // Child returns with error: yield the error
-                Poll::Ready(Ok(Err(error))) => {
-                    err = Some(RuntimeError::Application {
-                        name: child.name.clone(),
-                        error,
-                    });
-                    break;
-                }
-                // Child join error: it either panicked or was canceled
-                Poll::Ready(Err(e)) => {
-                    err = Some(match e.try_into_panic() {
-                        Ok(panic) => RuntimeError::Panic {
-                            name: child.name.clone(),
-                            panic,
-                        },
-                        Err(_) => unreachable!("impossible to cancel tasks in TaskGroup"),
-                    });
+                Poll::Ready(Err(error)) => {
+                    err = Some(error);
                     break;
                 }
             }
@@ -205,53 +237,17 @@ impl<E> Future for JoinHandle<E> {
     }
 }
 
-#[derive(Debug)]
-pub enum RuntimeError<E> {
-    Panic {
-        name: String,
-        panic: Box<dyn Any + Send + 'static>,
-    },
-    Application {
-        name: String,
-        error: E,
-    },
-}
-impl<E: std::fmt::Display + std::error::Error> std::error::Error for RuntimeError<E> {}
-impl<E: std::fmt::Display> std::fmt::Display for RuntimeError<E> {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            RuntimeError::Panic { name, .. } => {
-                write!(f, "Task `{}` panicked", name)
-            }
-            RuntimeError::Application { name, error } => {
-                write!(f, "Task `{}` errored: {}", name, error)
-            }
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum SpawnError {
-    GroupDied,
-}
-impl std::error::Error for SpawnError {}
-impl std::fmt::Display for SpawnError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            SpawnError::GroupDied => write!(f, "Task group died"),
-        }
-    }
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
     use anyhow::anyhow;
+    use async_std::prelude::*;
+    use async_std::sync::Mutex;
+    use async_std::task::sleep;
     use std::sync::Arc;
-    use tokio::sync::Mutex;
-    use tokio::time::{sleep, Duration};
+    use std::time::Duration;
 
-    #[tokio::test]
+    #[async_std::test]
     async fn no_task() {
         let handle = group(|group| async move {
             drop(group); // Must drop the ability to spawn for the taskmanager to be finished
@@ -260,7 +256,7 @@ mod test {
         assert!(handle.await.is_ok());
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn one_empty_task() {
         let handle = group(|group| async move {
             group.spawn(async move { Ok(()) });
@@ -270,7 +266,7 @@ mod test {
         assert!(handle.await.is_ok());
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn empty_child() {
         let handle = group(|group| async move {
             group.clone().spawn(async move {
@@ -282,7 +278,7 @@ mod test {
         assert!(handle.await.is_ok());
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn many_nested_children() {
         // Record a side-effect to demonstate that all of these children executed
         let log = Arc::new(Mutex::new(vec![0usize]));
@@ -312,7 +308,7 @@ mod test {
         assert!(handle.await.is_ok());
         assert_eq!(*l.lock().await, vec![0usize, 1, 2, 3, 4]);
     }
-    #[tokio::test]
+    #[async_std::test]
     async fn many_nested_children_error() {
         // Record a side-effect to demonstate that all of these children executed
         let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(vec![]));
@@ -345,7 +341,7 @@ mod test {
         });
         assert_eq!(
             format!("{:?}", handle.await),
-            "Err(Application { name: \"blank\", error: sooner or later you get a failson })"
+            "Err(sooner or later you get a failson)"
         );
         assert_eq!(
             *l.lock().await,
@@ -357,7 +353,7 @@ mod test {
             ]
         );
     }
-    #[tokio::test]
+    #[async_std::test]
     async fn root_task_errors() {
         let handle = group(|group| async move {
             group.spawn(async { Err(anyhow!("idk!")) });
@@ -365,13 +361,10 @@ mod test {
         });
         let res = handle.await;
         assert!(res.is_err());
-        assert_eq!(
-            format!("{:?}", res),
-            "Err(Application { name: \"blank\", error: idk! })"
-        );
+        assert_eq!(format!("{:?}", res), "Err(idk!)");
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn child_task_errors() {
         let handle = group(|group| async move {
             group.clone().spawn(async move {
@@ -382,51 +375,42 @@ mod test {
         });
         let res = handle.await;
         assert!(res.is_err());
-        assert_eq!(
-            format!("{:?}", res),
-            "Err(Application { name: \"blank\", error: whelp })"
-        );
+        assert_eq!(format!("{:?}", res), "Err(whelp)");
     }
 
-    #[tokio::test]
-    async fn root_task_panics() {
-        let handle = group(|group| async move {
-            group.spawn(async move { panic!("idk!") });
-            Ok::<(), ()>(())
-        });
+    // #[async_std::test]
+    // async fn root_task_panics() {
+    //     let handle = group(|group| async move {
+    //         group.spawn(async move { panic!("idk!") });
+    //         Ok::<(), ()>(())
+    //     });
 
-        let res = handle.await;
-        assert!(res.is_err());
-        match res.err().unwrap() {
-            RuntimeError::Panic { panic, .. } => {
-                assert_eq!(*panic.downcast_ref::<&'static str>().unwrap(), "idk!");
-            }
-            e => panic!("wrong error variant! {:?}", e),
-        }
-    }
+    //     let res = handle.await;
+    //     assert!(res.is_err());
+    //     match res.err().unwrap() {
+    //         e => panic!("wrong error variant! {:?}", e),
+    //     }
+    // }
 
-    #[tokio::test]
-    async fn child_task_panics() {
-        let handle = group(|group| async move {
-            let group2 = group.clone();
-            group.spawn(async move {
-                group2.spawn(async move { panic!("whelp") });
-                Ok::<(), ()>(())
-            });
-            Ok::<(), ()>(())
-        });
+    // #[async_std::test]
+    // async fn child_task_panics() {
+    //     let handle = group(|group| async move {
+    //         let group2 = group.clone();
+    //         group.spawn(async move {
+    //             group2.spawn(async move { panic!("whelp") });
+    //             Ok::<(), ()>(())
+    //         });
+    //         Ok::<(), ()>(())
+    //     });
 
-        let res = handle.await;
-        assert!(res.is_err());
-        match res.err().unwrap() {
-            RuntimeError::Panic { panic, .. } => {
-                assert_eq!(*panic.downcast_ref::<&'static str>().unwrap(), "whelp");
-            }
-            e => panic!("wrong error variant! {:?}", e),
-        }
-    }
+    //     let res = handle.await;
+    //     assert!(res.is_err());
+    //     match res.err().unwrap() {
+    //         e => panic!("wrong error variant! {:?}", e),
+    //     }
+    // }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn child_sleep_no_timeout() {
         // Record a side-effect to demonstate that all of these children executed
         let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(vec![]));
@@ -447,7 +431,7 @@ mod test {
             Ok::<(), ()>(())
         });
 
-        let res = tokio::time::timeout(Duration::from_secs(2), handle).await;
+        let res = handle.timeout(Duration::from_secs(2)).await;
         assert!(res.is_ok(), "no timeout");
         assert!(res.unwrap().is_ok(), "returned successfully");
         assert_eq!(
@@ -456,7 +440,7 @@ mod test {
         );
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn child_sleep_timeout() {
         let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(vec![]));
         let l = log.clone();
@@ -474,7 +458,7 @@ mod test {
             Ok(())
         });
 
-        let res = tokio::time::timeout(Duration::from_secs(1), handle).await;
+        let res = handle.timeout(Duration::from_secs(1)).await;
         assert!(res.is_err(), "timed out");
         assert_eq!(*l.lock().await, vec!["child gonna nap"]);
     }

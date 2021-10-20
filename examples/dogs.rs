@@ -1,5 +1,4 @@
 use anyhow::{anyhow, Error};
-use task_group::RuntimeError;
 use tokio::time::{Duration, Instant};
 
 #[tokio::main]
@@ -44,12 +43,7 @@ async fn main() -> Result<(), Error> {
             println!("dogs have not defeated me");
             Ok(())
         }
-        Ok(Err(RuntimeError::Application { name, error })) => {
-            Err(error.context(format!("task `{}` died", name)))
-        }
-        Ok(Err(RuntimeError::Panic { name, panic })) => {
-            Err(anyhow!("Panic: {:?}", panic).context(name))
-        }
+        Ok(Err(error)) => Err(error.context(format!("task died"))),
         Err(_) => Err(anyhow!("timeout")),
     }
 }
