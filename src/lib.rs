@@ -246,14 +246,14 @@ impl std::fmt::Display for SpawnError {
 #[cfg(test)]
 mod test {
     use super::*;
-    use anyhow::{anyhow, Error};
+    use anyhow::anyhow;
     use std::sync::Arc;
     use tokio::sync::Mutex;
     use tokio::time::{sleep, Duration};
 
     #[tokio::test]
     async fn no_task() {
-        let handle = group(|group| async {
+        let handle = group(|group| async move {
             drop(group); // Must drop the ability to spawn for the taskmanager to be finished
             Ok::<(), ()>(())
         });
@@ -262,7 +262,7 @@ mod test {
 
     #[tokio::test]
     async fn one_empty_task() {
-        let handle = group(|group| async {
+        let handle = group(|group| async move {
             group.spawn(async move { Ok(()) });
             drop(group); // Must drop the ability to spawn for the taskmanager to be finished
             Ok::<(), ()>(())
@@ -272,7 +272,7 @@ mod test {
 
     #[tokio::test]
     async fn empty_child() {
-        let handle = group(|group| async {
+        let handle = group(|group| async move {
             group.clone().spawn(async move {
                 group.spawn(async move { Ok(()) });
                 Ok(())
@@ -287,7 +287,7 @@ mod test {
         // Record a side-effect to demonstate that all of these children executed
         let log = Arc::new(Mutex::new(vec![0usize]));
         let l = log.clone();
-        let handle = group(|group| async {
+        let handle = group(|group| async move {
             group.clone().spawn(async move {
                 let log = log.clone();
                 let group2 = group.clone();
@@ -318,7 +318,7 @@ mod test {
         let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(vec![]));
         let l = log.clone();
 
-        let handle = group(|group| async {
+        let handle = group(|group| async move {
             let group2 = group.clone();
             group.spawn(async move {
                 log.lock().await.push("in root");
@@ -343,8 +343,10 @@ mod test {
             drop(group);
             Ok(())
         });
-        assert_eq!(format!("{:?}", handle.await),
-            "Err(Application { name: \"great grandchild\", error: sooner or later you get a failson })");
+        assert_eq!(
+            format!("{:?}", handle.await),
+            "Err(Application { name: \"blank\", error: sooner or later you get a failson })"
+        );
         assert_eq!(
             *l.lock().await,
             vec![
@@ -357,21 +359,21 @@ mod test {
     }
     #[tokio::test]
     async fn root_task_errors() {
-        let handle = group(|group| async {
-            group.spawn(async move { Err(anyhow!("idk!")) });
+        let handle = group(|group| async move {
+            group.spawn(async { Err(anyhow!("idk!")) });
             Ok(())
         });
         let res = handle.await;
         assert!(res.is_err());
         assert_eq!(
             format!("{:?}", res),
-            "Err(Application { name: \"root\", error: idk! })"
+            "Err(Application { name: \"blank\", error: idk! })"
         );
     }
 
     #[tokio::test]
     async fn child_task_errors() {
-        let handle = group(|group| async {
+        let handle = group(|group| async move {
             group.clone().spawn(async move {
                 group.spawn(async move { Err(anyhow!("whelp")) });
                 Ok(())
@@ -382,13 +384,13 @@ mod test {
         assert!(res.is_err());
         assert_eq!(
             format!("{:?}", res),
-            "Err(Application { name: \"child\", error: whelp })"
+            "Err(Application { name: \"blank\", error: whelp })"
         );
     }
 
     #[tokio::test]
     async fn root_task_panics() {
-        let handle = group(|group| async {
+        let handle = group(|group| async move {
             group.spawn(async move { panic!("idk!") });
             Ok::<(), ()>(())
         });
@@ -396,8 +398,7 @@ mod test {
         let res = handle.await;
         assert!(res.is_err());
         match res.err().unwrap() {
-            RuntimeError::Panic { name, panic } => {
-                assert_eq!(name, "root");
+            RuntimeError::Panic { panic, .. } => {
                 assert_eq!(*panic.downcast_ref::<&'static str>().unwrap(), "idk!");
             }
             e => panic!("wrong error variant! {:?}", e),
@@ -406,11 +407,11 @@ mod test {
 
     #[tokio::test]
     async fn child_task_panics() {
-        let handle = group(|group| async {
+        let handle = group(|group| async move {
             let group2 = group.clone();
             group.spawn(async move {
                 group2.spawn(async move { panic!("whelp") });
-                Ok(())
+                Ok::<(), ()>(())
             });
             Ok::<(), ()>(())
         });
@@ -418,8 +419,7 @@ mod test {
         let res = handle.await;
         assert!(res.is_err());
         match res.err().unwrap() {
-            RuntimeError::Panic { name, panic } => {
-                assert_eq!(name, "child");
+            RuntimeError::Panic { panic, .. } => {
                 assert_eq!(*panic.downcast_ref::<&'static str>().unwrap(), "whelp");
             }
             e => panic!("wrong error variant! {:?}", e),
@@ -431,7 +431,7 @@ mod test {
         // Record a side-effect to demonstate that all of these children executed
         let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(vec![]));
         let l = log.clone();
-        let handle = group(|group| async {
+        let handle = group(|group| async move {
             let group2 = group.clone();
             group.spawn(async move {
                 group2.spawn(async move {
@@ -443,10 +443,10 @@ mod test {
                 Ok(())
             });
 
-            Ok(())
+            drop(group); // Not going to launch anymore tasks
+            Ok::<(), ()>(())
         });
 
-        drop(group); // Not going to launch anymore tasks
         let res = tokio::time::timeout(Duration::from_secs(2), handle).await;
         assert!(res.is_ok(), "no timeout");
         assert!(res.unwrap().is_ok(), "returned successfully");
@@ -461,22 +461,20 @@ mod test {
         let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(vec![]));
         let l = log.clone();
 
-        let handle = group(|group| async {
+        let handle = group(|group| async move {
             let group2 = group.clone();
             group.spawn(async move {
-                group2
-                    .spawn(async move {
-                        log.lock().await.push("child gonna nap");
-                        sleep(Duration::from_secs(2)).await; // 2 sec sleep, 1 sec timeout
-                        unreachable!("child should not wake from this nap");
-                    })
-                    .await?;
-                Ok(())
+                group2.spawn(async move {
+                    log.lock().await.push("child gonna nap");
+                    sleep(Duration::from_secs(2)).await; // 2 sec sleep, 1 sec timeout
+                    unreachable!("child should not wake from this nap");
+                });
+                Ok::<(), ()>(())
             });
             Ok(())
         });
 
-        let res = tokio::time::timeout(Duration::from_secs(1), tm).await;
+        let res = tokio::time::timeout(Duration::from_secs(1), handle).await;
         assert!(res.is_err(), "timed out");
         assert_eq!(*l.lock().await, vec!["child gonna nap"]);
     }
