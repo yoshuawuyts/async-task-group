@@ -312,179 +312,172 @@ mod test {
         assert!(handle.await.is_ok());
         assert_eq!(*l.lock().await, vec![0usize, 1, 2, 3, 4]);
     }
-    // #[tokio::test]
-    // async fn many_nested_children_error() {
-    //     // Record a side-effect to demonstate that all of these children executed
-    //     let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(vec![]));
-    //     let l = log.clone();
+    #[tokio::test]
+    async fn many_nested_children_error() {
+        // Record a side-effect to demonstate that all of these children executed
+        let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(vec![]));
+        let l = log.clone();
 
-    //     let (group, tm): (TaskGroup<Error>, JoinHandle<_>) = group();
-    //     let group2 = group.clone();
-    //     group.spawn("root", async move {
-    //         log.lock().await.push("in root");
-    //         let group3 = group2.clone();
-    //         group2.spawn("child", async move {
-    //             log.lock().await.push("in child");
-    //             let group4 = group3.clone();
-    //             group3.spawn("grandchild", async move {
-    //                 log.lock().await.push("in grandchild");
-    //                 group4.spawn("great grandchild", async move {
-    //                     log.lock().await.push("in great grandchild");
-    //                     Err(anyhow!("sooner or later you get a failson"))
-    //                 })
-    //                 .await
-    //                 .unwrap();
-    //                 sleep(Duration::from_secs(1)).await;
-    //                 // The great-grandchild returning error should terminate this task.
-    //                 unreachable!("sleepy grandchild should never wake");
-    //             })
-    //             .await
-    //             .unwrap();
-    //             Ok(())
-    //         })
-    //         .await
-    //         .unwrap();
-    //         Ok(())
-    //     })
-    //     .await
-    //     .unwrap();
-    //     drop(group);
-    //     assert_eq!(format!("{:?}", tm.await),
-    //         "Err(Application { name: \"great grandchild\", error: sooner or later you get a failson })");
-    //     assert_eq!(
-    //         *l.lock().await,
-    //         vec![
-    //             "in root",
-    //             "in child",
-    //             "in grandchild",
-    //             "in great grandchild"
-    //         ]
-    //     );
-    // }
-    // #[tokio::test]
-    // async fn root_task_errors() {
-    //     let (group, tm): (TaskGroup<Error>, JoinHandle<_>) = group();
-    //     group.spawn("root", async move { Err(anyhow!("idk!")) })
-    //         .await
-    //         .unwrap();
-    //     let res = tm.await;
-    //     assert!(res.is_err());
-    //     assert_eq!(
-    //         format!("{:?}", res),
-    //         "Err(Application { name: \"root\", error: idk! })"
-    //     );
-    // }
+        let handle = group(|group| async {
+            let group2 = group.clone();
+            group.spawn(async move {
+                log.lock().await.push("in root");
+                let group3 = group2.clone();
+                group2.spawn(async move {
+                    log.lock().await.push("in child");
+                    let group4 = group3.clone();
+                    group3.spawn(async move {
+                        log.lock().await.push("in grandchild");
+                        group4.spawn(async move {
+                            log.lock().await.push("in great grandchild");
+                            Err(anyhow!("sooner or later you get a failson"))
+                        });
+                        sleep(Duration::from_secs(1)).await;
+                        // The great-grandchild returning error should terminate this task.
+                        unreachable!("sleepy grandchild should never wake");
+                    });
+                    Ok(())
+                });
+                Ok(())
+            });
+            drop(group);
+            Ok(())
+        });
+        assert_eq!(format!("{:?}", handle.await),
+            "Err(Application { name: \"great grandchild\", error: sooner or later you get a failson })");
+        assert_eq!(
+            *l.lock().await,
+            vec![
+                "in root",
+                "in child",
+                "in grandchild",
+                "in great grandchild"
+            ]
+        );
+    }
+    #[tokio::test]
+    async fn root_task_errors() {
+        let handle = group(|group| async {
+            group.spawn(async move { Err(anyhow!("idk!")) });
+            Ok(())
+        });
+        let res = handle.await;
+        assert!(res.is_err());
+        assert_eq!(
+            format!("{:?}", res),
+            "Err(Application { name: \"root\", error: idk! })"
+        );
+    }
 
-    // #[tokio::test]
-    // async fn child_task_errors() {
-    //     let (group, tm): (TaskGroup<Error>, JoinHandle<_>) = group();
-    //     group.clone()
-    //         .spawn("parent", async move {
-    //             group.spawn("child", async move { Err(anyhow!("whelp")) })
-    //                 .await?;
-    //             Ok(())
-    //         })
-    //         .await
-    //         .unwrap();
-    //     let res = tm.await;
-    //     assert!(res.is_err());
-    //     assert_eq!(
-    //         format!("{:?}", res),
-    //         "Err(Application { name: \"child\", error: whelp })"
-    //     );
-    // }
+    #[tokio::test]
+    async fn child_task_errors() {
+        let handle = group(|group| async {
+            group.clone().spawn(async move {
+                group.spawn(async move { Err(anyhow!("whelp")) });
+                Ok(())
+            });
+            Ok(())
+        });
+        let res = handle.await;
+        assert!(res.is_err());
+        assert_eq!(
+            format!("{:?}", res),
+            "Err(Application { name: \"child\", error: whelp })"
+        );
+    }
 
-    // #[tokio::test]
-    // async fn root_task_panics() {
-    //     let (group, tm): (TaskGroup<Error>, JoinHandle<_>) = group();
-    //     group.spawn("root", async move { panic!("idk!") })
-    //         .await
-    //         .unwrap();
+    #[tokio::test]
+    async fn root_task_panics() {
+        let handle = group(|group| async {
+            group.spawn(async move { panic!("idk!") });
+            Ok::<(), ()>(())
+        });
 
-    //     let res = tm.await;
-    //     assert!(res.is_err());
-    //     match res.err().unwrap() {
-    //         RuntimeError::Panic { name, panic } => {
-    //             assert_eq!(name, "root");
-    //             assert_eq!(*panic.downcast_ref::<&'static str>().unwrap(), "idk!");
-    //         }
-    //         e => panic!("wrong error variant! {:?}", e),
-    //     }
-    // }
+        let res = handle.await;
+        assert!(res.is_err());
+        match res.err().unwrap() {
+            RuntimeError::Panic { name, panic } => {
+                assert_eq!(name, "root");
+                assert_eq!(*panic.downcast_ref::<&'static str>().unwrap(), "idk!");
+            }
+            e => panic!("wrong error variant! {:?}", e),
+        }
+    }
 
-    // #[tokio::test]
-    // async fn child_task_panics() {
-    //     let (group, tm): (TaskGroup<Error>, JoinHandle<_>) = group();
-    //     let group2 = group.clone();
-    //     group.spawn("root", async move {
-    //         group2.spawn("child", async move { panic!("whelp") }).await?;
-    //         Ok(())
-    //     })
-    //     .await
-    //     .unwrap();
+    #[tokio::test]
+    async fn child_task_panics() {
+        let handle = group(|group| async {
+            let group2 = group.clone();
+            group.spawn(async move {
+                group2.spawn(async move { panic!("whelp") });
+                Ok(())
+            });
+            Ok::<(), ()>(())
+        });
 
-    //     let res = tm.await;
-    //     assert!(res.is_err());
-    //     match res.err().unwrap() {
-    //         RuntimeError::Panic { name, panic } => {
-    //             assert_eq!(name, "child");
-    //             assert_eq!(*panic.downcast_ref::<&'static str>().unwrap(), "whelp");
-    //         }
-    //         e => panic!("wrong error variant! {:?}", e),
-    //     }
-    // }
+        let res = handle.await;
+        assert!(res.is_err());
+        match res.err().unwrap() {
+            RuntimeError::Panic { name, panic } => {
+                assert_eq!(name, "child");
+                assert_eq!(*panic.downcast_ref::<&'static str>().unwrap(), "whelp");
+            }
+            e => panic!("wrong error variant! {:?}", e),
+        }
+    }
 
-    // #[tokio::test]
-    // async fn child_sleep_no_timeout() {
-    //     // Record a side-effect to demonstate that all of these children executed
-    //     let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(vec![]));
-    //     let l = log.clone();
-    //     let (group, tm): (TaskGroup<Error>, JoinHandle<_>) = group();
-    //     let group2 = group.clone();
-    //     group.spawn("parent", async move {
-    //         group2.spawn("child", async move {
-    //             log.lock().await.push("child gonna nap");
-    //             sleep(Duration::from_secs(1)).await; // 1 sec sleep, 2 sec timeout
-    //             log.lock().await.push("child woke up happy");
-    //             Ok(())
-    //         })
-    //         .await?;
-    //         Ok(())
-    //     })
-    //     .await
-    //     .unwrap();
+    #[tokio::test]
+    async fn child_sleep_no_timeout() {
+        // Record a side-effect to demonstate that all of these children executed
+        let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(vec![]));
+        let l = log.clone();
+        let handle = group(|group| async {
+            let group2 = group.clone();
+            group.spawn(async move {
+                group2.spawn(async move {
+                    log.lock().await.push("child gonna nap");
+                    sleep(Duration::from_secs(1)).await; // 1 sec sleep, 2 sec timeout
+                    log.lock().await.push("child woke up happy");
+                    Ok(())
+                });
+                Ok(())
+            });
 
-    //     drop(group); // Not going to launch anymore tasks
-    //     let res = tokio::time::timeout(Duration::from_secs(2), tm).await;
-    //     assert!(res.is_ok(), "no timeout");
-    //     assert!(res.unwrap().is_ok(), "returned successfully");
-    //     assert_eq!(
-    //         *l.lock().await,
-    //         vec!["child gonna nap", "child woke up happy"]
-    //     );
-    // }
+            Ok(())
+        });
 
-    // #[tokio::test]
-    // async fn child_sleep_timeout() {
-    //     let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(vec![]));
-    //     let l = log.clone();
+        drop(group); // Not going to launch anymore tasks
+        let res = tokio::time::timeout(Duration::from_secs(2), handle).await;
+        assert!(res.is_ok(), "no timeout");
+        assert!(res.unwrap().is_ok(), "returned successfully");
+        assert_eq!(
+            *l.lock().await,
+            vec!["child gonna nap", "child woke up happy"]
+        );
+    }
 
-    //     let (group, tm): (TaskGroup<Error>, JoinHandle<_>) = group();
-    //     let group2 = group.clone();
-    //     group.spawn("parent", async move {
-    //         group2.spawn("child", async move {
-    //             log.lock().await.push("child gonna nap");
-    //             sleep(Duration::from_secs(2)).await; // 2 sec sleep, 1 sec timeout
-    //             unreachable!("child should not wake from this nap");
-    //         })
-    //         .await?;
-    //         Ok(())
-    //     })
-    //     .await
-    //     .unwrap();
+    #[tokio::test]
+    async fn child_sleep_timeout() {
+        let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(vec![]));
+        let l = log.clone();
 
-    //     let res = tokio::time::timeout(Duration::from_secs(1), tm).await;
-    //     assert!(res.is_err(), "timed out");
-    //     assert_eq!(*l.lock().await, vec!["child gonna nap"]);
-    // }
+        let handle = group(|group| async {
+            let group2 = group.clone();
+            group.spawn(async move {
+                group2
+                    .spawn(async move {
+                        log.lock().await.push("child gonna nap");
+                        sleep(Duration::from_secs(2)).await; // 2 sec sleep, 1 sec timeout
+                        unreachable!("child should not wake from this nap");
+                    })
+                    .await?;
+                Ok(())
+            });
+            Ok(())
+        });
+
+        let res = tokio::time::timeout(Duration::from_secs(1), tm).await;
+        assert!(res.is_err(), "timed out");
+        assert_eq!(*l.lock().await, vec!["child gonna nap"]);
+    }
 }
