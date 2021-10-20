@@ -1,29 +1,48 @@
 
 # `task-group`
 
-A small crate for managing groups of tokio tasks.
+Create an echo tcp server which processes incoming connections in a loop
+without ever creating any dangling tasks:
 
 ```rust
+use async_std::prelude::*;
+use async_std::io;
+use async_std::net::{TcpListener, TcpStream};
+use async_std::task;
 
-let (task_group, task_manager): (TaskGroup<Error>, TaskManager<_>) = TaskGroup::new();
+async fn process(stream: TcpStream) -> io::Result<()> {
+    println!("Accepted from: {}", stream.peer_addr()?);
 
-task_group.clone().spawn("a task", async move {
-    task_group.spawn("b task", async move {
-        /* all kinds of things */
-        Ok(())
-    }).await.expect("spawned b");
+    let mut reader = stream.clone();
+    let mut writer = stream;
+    io::copy(&mut reader, &mut writer).await?;
+
     Ok(())
-}).await.expect("spawned a");
+}
 
-task_manager.await.expect("everyone successful");
+#[async_std::main]
+fn main() -> io::Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:8080").await?;
+    println!("Listening on {}", listener.local_addr()?);
 
+    let handle = task_group::group(|group| async move {
+        let mut incoming = listener.incoming();
+        while let Some(stream) = incoming.next().await {
+            let stream = stream?;
+            group.spawn(async move { process(stream).await });
+        }
+        Ok(())
+    });
+    handle.await?;
+    Ok(())
+}
 ```
 
 
 A `TaskGroup` is used to spawn a collection of tasks. The collection has two
 properties:
 * if any task returns an error or panicks, all tasks are terminated.
-* if the `TaskManager` returned by `TaskGroup::new` is dropped, all tasks are
+* if the `TaskManager` returned by `task_group::group` is dropped, all tasks are
 terminated.
 
 
