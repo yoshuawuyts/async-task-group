@@ -5,7 +5,7 @@ A small crate for managing groups of tokio tasks.
 
 ```rust
 
-let (task_group, task_manager): (TaskGroup<Error>, TaskManager<_>) = TaskGroup::new();
+let (task_group, task_manager): (TaskGroup<Error>, TaskManager<_>) = task_group::group();
 
 task_group.clone().spawn("a task", async move {
     task_group.spawn("b task", async move {
@@ -23,7 +23,7 @@ task_manager.await.expect("everyone successful");
 A `TaskGroup` is used to spawn a collection of tasks. The collection has two
 properties:
 * if any task returns an error or panicks, all tasks are terminated.
-* if the `TaskManager` returned by `TaskGroup::new` is dropped, all tasks are
+* if the `TaskManager` returned by `task_group::group` is dropped, all tasks are
 terminated.
 
 
