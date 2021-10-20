@@ -8,7 +8,7 @@ use tokio::task::JoinHandle as TokioJoinHandle;
 
 /// A TaskGroup is used to spawn a collection of tasks. The collection has two properties:
 /// * if any task returns an error or panicks, all tasks are terminated.
-/// * if the `TaskManager` returned by `group` is dropped, all tasks are terminated.
+/// * if the `JoinHandle` returned by `group` is dropped, all tasks are terminated.
 pub struct TaskGroup<E> {
     new_task: Sender<ChildHandle<E>>,
 }
@@ -31,7 +31,7 @@ where
     let (sender, receiver) = async_channel::unbounded();
     let group = TaskGroup { new_task: sender };
     let join_handle = JoinHandle::new(receiver);
-    group.spawn(f(group.clone()));
+    group.spawn(f(group.clone())); // FIXME move this to join handle rather than spawning it onto itself.
     join_handle
 }
 
@@ -81,7 +81,7 @@ impl<E> ChildHandle<E> {
     }
 }
 
-// As a consequence of this Drop impl, when a TaskManager is dropped, all of its children will be
+// As a consequence of this Drop impl, when a JoinHandle is dropped, all of its children will be
 // canceled.
 impl<E> Drop for ChildHandle<E> {
     fn drop(&mut self) {
@@ -89,13 +89,13 @@ impl<E> Drop for ChildHandle<E> {
     }
 }
 
-/// A TaskManager is used to manage a collection of tasks. There are two
+/// A JoinHandle is used to manage a collection of tasks. There are two
 /// things you can do with it:
-/// * TaskManager impls Future, so you can poll or await on it. It will be
+/// * JoinHandle impls Future, so you can poll or await on it. It will be
 /// Ready when all tasks return Ok(()) and the associated `TaskGroup` is
 /// dropped (so no more tasks can be created), or when any task panicks or
 /// returns an Err(E).
-/// * When a TaskManager is dropped, all tasks it contains are canceled
+/// * When a JoinHandle is dropped, all tasks it contains are canceled
 /// (terminated). So, if you use a combinator like
 /// `tokio::time::timeout(duration, task_manager).await`, all tasks will be
 /// terminated if the timeout occurs.
@@ -282,60 +282,53 @@ mod test {
         assert!(handle.await.is_ok());
     }
 
-    // #[tokio::test]
-    // async fn many_nested_children() {
-    //     // Record a side-effect to demonstate that all of these children executed
-    //     let log = Arc::new(Mutex::new(vec![0usize]));
-    //     let l = log.clone();
-    //     let (tg, tm): (TaskGroup<Error>, JoinHandle<_>) = group();
-    //     tg.clone()
-    //         .spawn("root", async move {
-    //             let log = log.clone();
-    //             let tg2 = tg.clone();
-    //             log.lock().await.push(1);
-    //             tg.spawn("child", async move {
-    //                 let tg3 = tg2.clone();
-    //                 log.lock().await.push(2);
-    //                 tg2.spawn("grandchild", async move {
-    //                     log.lock().await.push(3);
-    //                     tg3.spawn("great grandchild", async move {
-    //                         log.lock().await.push(4);
-    //                         Ok(())
-    //                     })
-    //                     .await
-    //                     .unwrap();
-    //                     Ok(())
-    //                 })
-    //                 .await
-    //                 .unwrap();
-    //                 Ok(())
-    //             })
-    //             .await
-    //             .unwrap();
-    //             Ok(())
-    //         })
-    //         .await
-    //         .unwrap();
-    //     assert!(tm.await.is_ok());
-    //     assert_eq!(*l.lock().await, vec![0usize, 1, 2, 3, 4]);
-    // }
+    #[tokio::test]
+    async fn many_nested_children() {
+        // Record a side-effect to demonstate that all of these children executed
+        let log = Arc::new(Mutex::new(vec![0usize]));
+        let l = log.clone();
+        let handle = group(|group| async {
+            group.clone().spawn(async move {
+                let log = log.clone();
+                let group2 = group.clone();
+                log.lock().await.push(1);
+                group.spawn(async move {
+                    let group3 = group2.clone();
+                    log.lock().await.push(2);
+                    group2.spawn(async move {
+                        log.lock().await.push(3);
+                        group3.spawn(async move {
+                            log.lock().await.push(4);
+                            Ok(())
+                        });
+                        Ok(())
+                    });
+                    Ok(())
+                });
+                Ok(())
+            });
+            Ok::<(), ()>(())
+        });
+        assert!(handle.await.is_ok());
+        assert_eq!(*l.lock().await, vec![0usize, 1, 2, 3, 4]);
+    }
     // #[tokio::test]
     // async fn many_nested_children_error() {
     //     // Record a side-effect to demonstate that all of these children executed
     //     let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(vec![]));
     //     let l = log.clone();
 
-    //     let (tg, tm): (TaskGroup<Error>, JoinHandle<_>) = group();
-    //     let tg2 = tg.clone();
-    //     tg.spawn("root", async move {
+    //     let (group, tm): (TaskGroup<Error>, JoinHandle<_>) = group();
+    //     let group2 = group.clone();
+    //     group.spawn("root", async move {
     //         log.lock().await.push("in root");
-    //         let tg3 = tg2.clone();
-    //         tg2.spawn("child", async move {
+    //         let group3 = group2.clone();
+    //         group2.spawn("child", async move {
     //             log.lock().await.push("in child");
-    //             let tg4 = tg3.clone();
-    //             tg3.spawn("grandchild", async move {
+    //             let group4 = group3.clone();
+    //             group3.spawn("grandchild", async move {
     //                 log.lock().await.push("in grandchild");
-    //                 tg4.spawn("great grandchild", async move {
+    //                 group4.spawn("great grandchild", async move {
     //                     log.lock().await.push("in great grandchild");
     //                     Err(anyhow!("sooner or later you get a failson"))
     //                 })
@@ -355,7 +348,7 @@ mod test {
     //     })
     //     .await
     //     .unwrap();
-    //     drop(tg);
+    //     drop(group);
     //     assert_eq!(format!("{:?}", tm.await),
     //         "Err(Application { name: \"great grandchild\", error: sooner or later you get a failson })");
     //     assert_eq!(
@@ -370,8 +363,8 @@ mod test {
     // }
     // #[tokio::test]
     // async fn root_task_errors() {
-    //     let (tg, tm): (TaskGroup<Error>, JoinHandle<_>) = group();
-    //     tg.spawn("root", async move { Err(anyhow!("idk!")) })
+    //     let (group, tm): (TaskGroup<Error>, JoinHandle<_>) = group();
+    //     group.spawn("root", async move { Err(anyhow!("idk!")) })
     //         .await
     //         .unwrap();
     //     let res = tm.await;
@@ -384,10 +377,10 @@ mod test {
 
     // #[tokio::test]
     // async fn child_task_errors() {
-    //     let (tg, tm): (TaskGroup<Error>, JoinHandle<_>) = group();
-    //     tg.clone()
+    //     let (group, tm): (TaskGroup<Error>, JoinHandle<_>) = group();
+    //     group.clone()
     //         .spawn("parent", async move {
-    //             tg.spawn("child", async move { Err(anyhow!("whelp")) })
+    //             group.spawn("child", async move { Err(anyhow!("whelp")) })
     //                 .await?;
     //             Ok(())
     //         })
@@ -403,8 +396,8 @@ mod test {
 
     // #[tokio::test]
     // async fn root_task_panics() {
-    //     let (tg, tm): (TaskGroup<Error>, JoinHandle<_>) = group();
-    //     tg.spawn("root", async move { panic!("idk!") })
+    //     let (group, tm): (TaskGroup<Error>, JoinHandle<_>) = group();
+    //     group.spawn("root", async move { panic!("idk!") })
     //         .await
     //         .unwrap();
 
@@ -421,10 +414,10 @@ mod test {
 
     // #[tokio::test]
     // async fn child_task_panics() {
-    //     let (tg, tm): (TaskGroup<Error>, JoinHandle<_>) = group();
-    //     let tg2 = tg.clone();
-    //     tg.spawn("root", async move {
-    //         tg2.spawn("child", async move { panic!("whelp") }).await?;
+    //     let (group, tm): (TaskGroup<Error>, JoinHandle<_>) = group();
+    //     let group2 = group.clone();
+    //     group.spawn("root", async move {
+    //         group2.spawn("child", async move { panic!("whelp") }).await?;
     //         Ok(())
     //     })
     //     .await
@@ -446,10 +439,10 @@ mod test {
     //     // Record a side-effect to demonstate that all of these children executed
     //     let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(vec![]));
     //     let l = log.clone();
-    //     let (tg, tm): (TaskGroup<Error>, JoinHandle<_>) = group();
-    //     let tg2 = tg.clone();
-    //     tg.spawn("parent", async move {
-    //         tg2.spawn("child", async move {
+    //     let (group, tm): (TaskGroup<Error>, JoinHandle<_>) = group();
+    //     let group2 = group.clone();
+    //     group.spawn("parent", async move {
+    //         group2.spawn("child", async move {
     //             log.lock().await.push("child gonna nap");
     //             sleep(Duration::from_secs(1)).await; // 1 sec sleep, 2 sec timeout
     //             log.lock().await.push("child woke up happy");
@@ -461,7 +454,7 @@ mod test {
     //     .await
     //     .unwrap();
 
-    //     drop(tg); // Not going to launch anymore tasks
+    //     drop(group); // Not going to launch anymore tasks
     //     let res = tokio::time::timeout(Duration::from_secs(2), tm).await;
     //     assert!(res.is_ok(), "no timeout");
     //     assert!(res.unwrap().is_ok(), "returned successfully");
@@ -476,10 +469,10 @@ mod test {
     //     let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(vec![]));
     //     let l = log.clone();
 
-    //     let (tg, tm): (TaskGroup<Error>, JoinHandle<_>) = group();
-    //     let tg2 = tg.clone();
-    //     tg.spawn("parent", async move {
-    //         tg2.spawn("child", async move {
+    //     let (group, tm): (TaskGroup<Error>, JoinHandle<_>) = group();
+    //     let group2 = group.clone();
+    //     group.spawn("parent", async move {
+    //         group2.spawn("child", async move {
     //             log.lock().await.push("child gonna nap");
     //             sleep(Duration::from_secs(2)).await; // 2 sec sleep, 1 sec timeout
     //             unreachable!("child should not wake from this nap");
