@@ -5,7 +5,8 @@
 //!
 //! # Examples
 //!
-//! We can process streams in a loop without creating any dangling tasks:
+//! Create an echo tcp server which processes incoming connections in a loop
+//! without ever creating any dangling tasks:
 //!
 //! ```
 //! use async_std::io;
