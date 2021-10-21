@@ -29,7 +29,7 @@
 //!     let listener = TcpListener::bind("127.0.0.1:8080").await?;
 //!     println!("Listening on {}", listener.local_addr()?);
 //!
-//!     let handle = task_group::group(|group| async move {
+//!     let handle = async_task_group::group(|group| async move {
 //!         let mut incoming = listener.incoming();
 //!         while let Some(stream) = incoming.next().await {
 //!             let stream = stream?;
@@ -75,7 +75,7 @@ impl<E> Clone for TaskGroup<E> {
 }
 
 /// Create a new instance.
-pub fn group<E, Fut, F>(f: F) -> JoinHandle<E>
+pub fn group<E, Fut, F>(f: F) -> GroupJoinHandle<E>
 where
     E: Send + 'static,
     F: FnOnce(TaskGroup<E>) -> Fut,
@@ -83,7 +83,7 @@ where
 {
     let (sender, receiver) = async_channel::unbounded();
     let group = TaskGroup { new_task: sender };
-    let join_handle = JoinHandle::new(receiver);
+    let join_handle = GroupJoinHandle::new(receiver);
     group.spawn(f(group.clone())); // FIXME move this to join handle rather than spawning it onto itself.
     join_handle
 }
@@ -146,12 +146,12 @@ impl<E> Drop for ChildHandle<E> {
 /// `tokio::time::timeout(duration, task_manager).await`, all tasks will be
 /// terminated if the timeout occurs.
 #[derive(Debug)]
-pub struct JoinHandle<E> {
+pub struct GroupJoinHandle<E> {
     channel: Option<Receiver<ChildHandle<E>>>,
     children: Vec<Pin<Box<ChildHandle<E>>>>,
 }
 
-impl<E> JoinHandle<E> {
+impl<E> GroupJoinHandle<E> {
     fn new(channel: Receiver<ChildHandle<E>>) -> Self {
         Self {
             channel: Some(channel),
@@ -160,7 +160,7 @@ impl<E> JoinHandle<E> {
     }
 }
 
-impl<E> Future for JoinHandle<E> {
+impl<E> Future for GroupJoinHandle<E> {
     type Output = Result<(), E>;
     fn poll(mut self: Pin<&mut Self>, ctx: &mut Context) -> Poll<Self::Output> {
         let mut s = self.as_mut();

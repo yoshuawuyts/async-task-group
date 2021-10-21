@@ -26,7 +26,7 @@ fn main() -> io::Result<()> {
         let listener = TcpListener::bind("127.0.0.1:8080").await?;
         println!("Listening on {}", listener.local_addr()?);
 
-        let handle = task_group::group(|group| async move {
+        let handle = async_task_group::group(|group| async move {
             let mut incoming = listener.incoming();
             while let Some(stream) = incoming.next().await {
                 let stream = stream?;

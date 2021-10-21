@@ -4,7 +4,7 @@ use tokio::time::{Duration, Instant};
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     let deadline = Instant::now() + Duration::from_secs(5);
-    let handle = task_group::group(|group| async move {
+    let handle = async_task_group::group(|group| async move {
         println!("hello dogs!");
 
         group.spawn(async move {

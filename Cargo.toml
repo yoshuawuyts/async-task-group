@@ -1,11 +1,11 @@
 [package]
-name = "task-group"
+name = "async-task-group"
 version = "0.2.1"
-authors = ["Pat Hickey <pat@moreproductive.org>"]
+authors = ["Pat Hickey <pat@moreproductive.org>", "Yoshua Wuyts <yoshuawuyts@gmail.com>"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/pchickey/task-group"
-description = "manage groups of tokio tasks"
-keywords = ["tokio", "async"]
+repository = "https://github.com/yoshuawuyts/async-task-group"
+description = "manage groups of async_std tasks"
+keywords = ["async_std", "async", "futures", "task", "spawn"]
 readme = "README.md"
 edition = "2018"
 
