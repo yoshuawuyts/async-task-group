@@ -47,7 +47,7 @@
 
 use async_channel::{self, Receiver, Sender};
 
-use async_std::task::{self, JoinHandle as AsyncStdJoinHandle};
+use async_std::task::{self, JoinHandle};
 use async_std::task::{Context, Poll};
 use core::future::Future;
 use core::pin::Pin;
@@ -172,12 +172,12 @@ where
 
 #[derive(Debug)]
 struct ChildHandle<E> {
-    handle: AsyncStdJoinHandle<Result<(), E>>,
+    handle: JoinHandle<Result<(), E>>,
 }
 
 impl<E> ChildHandle<E> {
     // Pin projection. Since there is only this one required, avoid pulling in the proc macro.
-    fn pin_join(self: Pin<&mut Self>) -> Pin<&mut AsyncStdJoinHandle<Result<(), E>>> {
+    fn pin_join(self: Pin<&mut Self>) -> Pin<&mut JoinHandle<Result<(), E>>> {
         unsafe { self.map_unchecked_mut(|s| &mut s.handle) }
     }
 }
