@@ -47,7 +47,7 @@
 
 use async_channel::{self, Receiver, Sender};
 
-use async_global_executor::Task;
+use async_std::task::{self, JoinHandle as AsyncStdJoinHandle};
 use async_std::task::{Context, Poll};
 use core::future::Future;
 use core::pin::Pin;
@@ -57,7 +57,7 @@ use futures_core::Stream;
 /// * if any task returns an error or panicks, all tasks are terminated.
 /// * if the `JoinHandle` returned by `group` is dropped, all tasks are terminated.
 pub struct TaskGroup<E> {
-    new_task: Sender<ChildHandle<E>>,
+    sender: Sender<ChildHandle<E>>,
 }
 
 impl<E> std::fmt::Debug for TaskGroup<E> {
@@ -69,7 +69,7 @@ impl<E> std::fmt::Debug for TaskGroup<E> {
 impl<E> Clone for TaskGroup<E> {
     fn clone(&self) -> Self {
         Self {
-            new_task: self.new_task.clone(),
+            sender: self.sender.clone(),
         }
     }
 }
@@ -82,21 +82,24 @@ where
     Fut: Future<Output = Result<(), E>> + Send + 'static,
 {
     let (sender, receiver) = async_channel::unbounded();
-    let group = TaskGroup { new_task: sender };
+    let group = TaskGroup { sender };
     let join_handle = GroupJoinHandle::new(receiver);
     group.spawn(f(group.clone())); // FIXME move this to join handle rather than spawning it onto itself.
     join_handle
 }
 
-impl<E: Send + 'static> TaskGroup<E> {
+impl<E> TaskGroup<E>
+where
+    E: Send + 'static,
+{
     /// Spawn a new task on the runtime.
     pub fn spawn<F>(&self, f: F)
     where
         F: Future<Output = Result<(), E>> + Send + 'static,
     {
-        let join = async_global_executor::spawn(f);
-        self.new_task
-            .try_send(ChildHandle { join })
+        let join = task::spawn(f);
+        self.sender
+            .try_send(ChildHandle { handle: join })
             .expect("Sending a task to the channel failed");
     }
 
@@ -105,27 +108,77 @@ impl<E: Send + 'static> TaskGroup<E> {
     where
         F: Future<Output = Result<(), E>> + 'static,
     {
-        let join = async_global_executor::spawn_local(f);
-        self.new_task
-            .try_send(ChildHandle { join })
+        let join = task::spawn_local(f);
+        self.sender
+            .try_send(ChildHandle { handle: join })
             .expect("Sending a task to the channel failed");
+    }
+
+    /// Create a new builder.
+    pub fn build(&self) -> GroupBuilder<'_, E> {
+        GroupBuilder {
+            task_group: self,
+            builder: task::Builder::new(),
+        }
     }
 
     /// Returns `true` if the task group has been shut down.
     pub fn is_closed(&self) -> bool {
-        self.new_task.is_closed()
+        self.sender.is_closed()
+    }
+}
+
+/// Task builder that configures the settings of a new task.
+#[derive(Debug)]
+pub struct GroupBuilder<'a, E> {
+    task_group: &'a TaskGroup<E>,
+    builder: task::Builder,
+}
+
+impl<'a, E> GroupBuilder<'a, E>
+where
+    E: Send + 'static,
+{
+    /// Configures the name of the task.
+    pub fn name<A: AsRef<String>>(mut self, name: A) -> Self {
+        self.builder = self.builder.name(name.as_ref().to_owned());
+        self
+    }
+
+    /// Spawns a task with the configured settings.
+    pub fn spawn<F>(self, future: F)
+    where
+        F: Future<Output = Result<(), E>> + Send + 'static,
+    {
+        let handle = self.builder.spawn(future).unwrap();
+        self.task_group
+            .sender
+            .try_send(ChildHandle { handle })
+            .expect("Sending a task to the channel failed");
+    }
+
+    ///Spawns a task locally with the configured settings.
+    pub fn spawn_local<F>(self, future: F)
+    where
+        F: Future<Output = Result<(), E>> + 'static,
+    {
+        let handle = self.builder.local(future).unwrap();
+        self.task_group
+            .sender
+            .try_send(ChildHandle { handle })
+            .expect("Sending a task to the channel failed");
     }
 }
 
 #[derive(Debug)]
 struct ChildHandle<E> {
-    join: Task<Result<(), E>>,
+    handle: AsyncStdJoinHandle<Result<(), E>>,
 }
 
 impl<E> ChildHandle<E> {
     // Pin projection. Since there is only this one required, avoid pulling in the proc macro.
-    fn pin_join(self: Pin<&mut Self>) -> Pin<&mut Task<Result<(), E>>> {
-        unsafe { self.map_unchecked_mut(|s| &mut s.join) }
+    fn pin_join(self: Pin<&mut Self>) -> Pin<&mut AsyncStdJoinHandle<Result<(), E>>> {
+        unsafe { self.map_unchecked_mut(|s| &mut s.handle) }
     }
 }
 
