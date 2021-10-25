@@ -113,7 +113,7 @@ where
     {
         let join = task::spawn(f);
         self.sender
-            .try_send(ChildHandle { handle: join })
+            .try_send(ChildHandle { handle: Some(join) })
             .expect("Sending a task to the channel failed");
     }
 
@@ -124,7 +124,7 @@ where
     {
         let join = task::spawn_local(f);
         self.sender
-            .try_send(ChildHandle { handle: join })
+            .try_send(ChildHandle { handle: Some(join) })
             .expect("Sending a task to the channel failed");
     }
 
@@ -176,7 +176,7 @@ where
         let handle = self.builder.spawn(future).unwrap();
         self.task_group
             .sender
-            .try_send(ChildHandle { handle })
+            .try_send(ChildHandle::new(handle))
             .expect("Sending a task to the channel failed");
     }
 
@@ -188,27 +188,35 @@ where
         let handle = self.builder.local(future).unwrap();
         self.task_group
             .sender
-            .try_send(ChildHandle { handle })
+            .try_send(ChildHandle::new(handle))
             .expect("Sending a task to the channel failed");
     }
 }
 
 #[derive(Debug)]
 struct ChildHandle<E> {
-    handle: JoinHandle<Result<(), E>>,
+    handle: Option<JoinHandle<Result<(), E>>>,
 }
 
 impl<E> ChildHandle<E> {
+    fn new(handle: JoinHandle<Result<(), E>>) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+
     // Pin projection. Since there is only this one required, avoid pulling in the proc macro.
     fn pin_join(self: Pin<&mut Self>) -> Pin<&mut JoinHandle<Result<(), E>>> {
-        unsafe { self.map_unchecked_mut(|s| &mut s.handle) }
+        unsafe { self.map_unchecked_mut(|s| s.handle.as_mut().unwrap()) }
     }
 }
 
 // As a consequence of this Drop impl, when a JoinHandle is dropped, all of its children will be
 // canceled.
 impl<E> Drop for ChildHandle<E> {
-    fn drop(&mut self) {}
+    fn drop(&mut self) {
+        let _ = self.handle.take().unwrap().cancel();
+    }
 }
 
 /// A JoinHandle is used to manage a collection of tasks. There are two
