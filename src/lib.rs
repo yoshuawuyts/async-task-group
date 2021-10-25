@@ -3,12 +3,31 @@
 //! Enables cancellation to be propagated across tasks, and ensures if an error
 //! occurs that all sibling tasks in the group are cancelled too.
 //!
+//! # Closures and References
+//!
+//! When calling `group`, a `GroupHandle` instance is passed into the closure.
+//! The intended design is that the instance of `GroupHandle` never outlives the
+//! closure it's contained within. This makes it so when the `TaskGroup` exits
+//! or is cancelled, it is also no longer possible to spawn more tasks on the
+//! group.
+//!
+//! Unfortunately
+//!
+//! When calling `group`, a `GroupHandle` is passed into the closure. Async Rust
+//! currently does not support passing references into closures, so this
+//! reference is passed by-value, and needs to be returned by the end of the
+//! closure.
+//!
+//! This does not yet provide guarantees as strong as actual references can
+//! (lifetimes provide an additional uniqueness guarantee), but makes it
+//! unlikely to be misused. In general the assumption
+//!
 //! # Examples
 //!
 //! Create an echo tcp server which processes incoming connections in a loop
 //! without ever creating any dangling tasks:
 //!
-//! ```
+//! ```no_run
 //! use async_std::io;
 //! use async_std::net::{TcpListener, TcpStream};
 //! use async_std::prelude::*;
@@ -25,7 +44,7 @@
 //! }
 //!
 //! #[async_std::main]
-//! fn main() -> io::Result<()> {
+//! async fn main() -> io::Result<()> {
 //!     let listener = TcpListener::bind("127.0.0.1:8080").await?;
 //!     println!("Listening on {}", listener.local_addr()?);
 //!
@@ -35,7 +54,7 @@
 //!             let stream = stream?;
 //!             group.spawn(async move { process(stream).await });
 //!         }
-//!         Ok(())
+//!         Ok(group)
 //!     });
 //!     handle.await?;
 //!     Ok(())

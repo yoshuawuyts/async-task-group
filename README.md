@@ -5,9 +5,9 @@ Create an echo tcp server which processes incoming connections in a loop
 without ever creating any dangling tasks:
 
 ```rust
-use async_std::prelude::*;
 use async_std::io;
 use async_std::net::{TcpListener, TcpStream};
+use async_std::prelude::*;
 use async_std::task;
 
 async fn process(stream: TcpStream) -> io::Result<()> {
@@ -21,7 +21,7 @@ async fn process(stream: TcpStream) -> io::Result<()> {
 }
 
 #[async_std::main]
-fn main() -> io::Result<()> {
+async fn main() -> io::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:8080").await?;
     println!("Listening on {}", listener.local_addr()?);
 
@@ -31,7 +31,7 @@ fn main() -> io::Result<()> {
             let stream = stream?;
             group.spawn(async move { process(stream).await });
         }
-        Ok(())
+        Ok(group)
     });
     handle.await?;
     Ok(())
