@@ -11,16 +11,10 @@
 //! or is cancelled, it is also no longer possible to spawn more tasks on the
 //! group.
 //!
-//! Unfortunately
-//!
-//! When calling `group`, a `GroupHandle` is passed into the closure. Async Rust
-//! currently does not support passing references into closures, so this
-//! reference is passed by-value, and needs to be returned by the end of the
-//! closure.
-//!
-//! This does not yet provide guarantees as strong as actual references can
-//! (lifetimes provide an additional uniqueness guarantee), but makes it
-//! unlikely to be misused. In general the assumption
+//! However async closures are not yet a primitive in Rust, so we
+//! cannot yet pass `GroupHandle` by-reference. Instead we approximate the borrowing
+//! behavior by requiring the `GroupHandle` instance be returned at the end of
+//! the closure.
 //!
 //! # Examples
 //!
