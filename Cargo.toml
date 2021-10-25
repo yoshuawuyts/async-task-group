@@ -4,18 +4,14 @@ version = "0.2.1"
 authors = ["Pat Hickey <pat@moreproductive.org>", "Yoshua Wuyts <yoshuawuyts@gmail.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/yoshuawuyts/async-task-group"
-description = "manage groups of async_std tasks"
+description = "Manage groups of `async-std` tasks as a single unit."
 keywords = ["async_std", "async", "futures", "task", "spawn"]
 readme = "README.md"
 edition = "2018"
 
 [dependencies]
-async-channel = "1.6.1"
-futures-core = "0.3.17"
 async-std =  { version = "1.10.0", features = ["unstable"] }
-async-global-executor = "2.0.2"
 
 [dev-dependencies]
-anyhow = "1"
-tokio = { version = "^1.2.0", features = ["full", "rt"] }
 async-std = { version = "1.10.0", features = ["unstable", "attributes"] }
+anyhow = "1.0.44"

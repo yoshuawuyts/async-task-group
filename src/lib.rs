@@ -16,6 +16,12 @@
 //! behavior by requiring the `GroupHandle` instance be returned at the end of
 //! the closure.
 //!
+//! # Credit
+//!
+//! This codebase is based on the
+//! [`task-group`](https://github.com/pchickey/task-group) project by Pat
+//! Hickey.
+//!
 //! # Examples
 //!
 //! Create an echo tcp server which processes incoming connections in a loop
@@ -58,13 +64,12 @@
 #![deny(missing_debug_implementations, nonstandard_style)]
 #![warn(missing_docs, unreachable_pub)]
 
-use async_channel::{self, Receiver, Sender};
-
+use async_std::channel::{self, Receiver, Sender};
+use async_std::future::Future;
+use async_std::stream::Stream;
 use async_std::task::{self, JoinHandle};
 use async_std::task::{Context, Poll};
-use core::future::Future;
 use core::pin::Pin;
-use futures_core::Stream;
 
 /// A TaskGroup is used to spawn a collection of tasks. The collection has two properties:
 /// * if any task returns an error or panicks, all tasks are terminated.
@@ -86,7 +91,7 @@ where
     F: FnOnce(TaskGroup<E>) -> Fut,
     Fut: Future<Output = Result<TaskGroup<E>, E>> + Send + 'static,
 {
-    let (sender, receiver) = async_channel::unbounded();
+    let (sender, receiver) = channel::unbounded();
     let group = TaskGroup { sender };
     let join_handle = GroupJoinHandle::new(receiver);
     let fut = f(group.clone());
