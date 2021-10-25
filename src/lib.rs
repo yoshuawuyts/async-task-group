@@ -92,28 +92,33 @@ where
     Fut: Future<Output = Result<TaskGroup<E>, E>> + Send + 'static,
 {
     let (sender, receiver) = channel::unbounded();
-    let group = TaskGroup { sender };
-    let join_handle = GroupJoinHandle::new(receiver);
+    let group = TaskGroup::new(sender);
+    let handle = GroupJoinHandle::new(receiver);
+
     let fut = f(group.clone());
     group.spawn(async move {
         let _ = fut.await;
         Ok(())
     });
-    join_handle
+
+    handle
 }
 
 impl<E> TaskGroup<E>
 where
     E: Send + 'static,
 {
+    fn new(sender: Sender<ChildHandle<E>>) -> Self {
+        Self { sender }
+    }
+
     /// Spawn a new task on the runtime.
     pub fn spawn<F>(&self, f: F)
     where
         F: Future<Output = Result<(), E>> + Send + 'static,
     {
-        let join = task::spawn(f);
         self.sender
-            .try_send(ChildHandle { handle: Some(join) })
+            .try_send(ChildHandle::new(task::spawn(f)))
             .expect("Sending a task to the channel failed");
     }
 
@@ -122,9 +127,8 @@ where
     where
         F: Future<Output = Result<(), E>> + 'static,
     {
-        let join = task::spawn_local(f);
         self.sender
-            .try_send(ChildHandle { handle: Some(join) })
+            .try_send(ChildHandle::new(task::spawn_local(f)))
             .expect("Sending a task to the channel failed");
     }
 
