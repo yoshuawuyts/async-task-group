@@ -35,7 +35,7 @@ async fn main() -> Result<(), Error> {
             Ok(())
         });
 
-        Ok(())
+        Ok(group)
     });
 
     match tokio::time::timeout_at(deadline, handle).await {

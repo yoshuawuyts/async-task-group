@@ -32,7 +32,7 @@ fn main() -> io::Result<()> {
                 let stream = stream?;
                 group.spawn(async move { process(stream).await });
             }
-            Ok(())
+            Ok(group)
         });
         handle.await?;
         Ok(())

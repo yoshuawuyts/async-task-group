@@ -65,26 +65,22 @@ impl<E> std::fmt::Debug for TaskGroup<E> {
         f.debug_struct("TaskGroup").finish_non_exhaustive()
     }
 }
-// not the derived impl: E does not need to be Clone
-impl<E> Clone for TaskGroup<E> {
-    fn clone(&self) -> Self {
-        Self {
-            sender: self.sender.clone(),
-        }
-    }
-}
 
 /// Create a new instance.
 pub fn group<E, Fut, F>(f: F) -> GroupJoinHandle<E>
 where
     E: Send + 'static,
     F: FnOnce(TaskGroup<E>) -> Fut,
-    Fut: Future<Output = Result<(), E>> + Send + 'static,
+    Fut: Future<Output = Result<TaskGroup<E>, E>> + Send + 'static,
 {
     let (sender, receiver) = async_channel::unbounded();
     let group = TaskGroup { sender };
     let join_handle = GroupJoinHandle::new(receiver);
-    group.spawn(f(group.clone())); // FIXME move this to join handle rather than spawning it onto itself.
+    let fut = f(group.clone());
+    group.spawn(async move {
+        let _ = fut.await;
+        Ok(())
+    });
     join_handle
 }
 
@@ -126,9 +122,18 @@ where
     pub fn is_closed(&self) -> bool {
         self.sender.is_closed()
     }
+
+    // Private clone method. This should not be public to guarantee no handle to
+    // `TaskGroup` cannot outlive the closure in which it is granted. Once Rust
+    // has async closures, we can pass `&TaskGroup` down the to closure.
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+        }
+    }
 }
 
-/// Task builder that configures the settings of a new task.
+/// Task builder that configures the settings of a new task
 #[derive(Debug)]
 pub struct GroupBuilder<'a, E> {
     task_group: &'a TaskGroup<E>,
@@ -295,18 +300,10 @@ impl<E> Future for GroupJoinHandle<E> {
 mod test {
     use super::*;
     use anyhow::anyhow;
-    use async_std::prelude::*;
-    use async_std::sync::Mutex;
-    use async_std::task::sleep;
-    use std::sync::Arc;
-    use std::time::Duration;
 
     #[async_std::test]
     async fn no_task() {
-        let handle = group(|group| async move {
-            drop(group); // Must drop the ability to spawn for the taskmanager to be finished
-            Ok::<(), ()>(())
-        });
+        let handle = group(|group| async move { Ok::<_, ()>(group) });
         assert!(handle.await.is_ok());
     }
 
@@ -314,206 +311,19 @@ mod test {
     async fn one_empty_task() {
         let handle = group(|group| async move {
             group.spawn(async move { Ok(()) });
-            drop(group); // Must drop the ability to spawn for the taskmanager to be finished
-            Ok::<(), ()>(())
+            Ok::<_, ()>(group)
         });
         assert!(handle.await.is_ok());
     }
 
-    #[async_std::test]
-    async fn empty_child() {
-        let handle = group(|group| async move {
-            group.clone().spawn(async move {
-                group.spawn(async move { Ok(()) });
-                Ok(())
-            });
-            Ok::<(), ()>(())
-        });
-        assert!(handle.await.is_ok());
-    }
-
-    #[async_std::test]
-    async fn many_nested_children() {
-        // Record a side-effect to demonstate that all of these children executed
-        let log = Arc::new(Mutex::new(vec![0usize]));
-        let l = log.clone();
-        let handle = group(|group| async move {
-            group.clone().spawn(async move {
-                let log = log.clone();
-                let group2 = group.clone();
-                log.lock().await.push(1);
-                group.spawn(async move {
-                    let group3 = group2.clone();
-                    log.lock().await.push(2);
-                    group2.spawn(async move {
-                        log.lock().await.push(3);
-                        group3.spawn(async move {
-                            log.lock().await.push(4);
-                            Ok(())
-                        });
-                        Ok(())
-                    });
-                    Ok(())
-                });
-                Ok(())
-            });
-            Ok::<(), ()>(())
-        });
-        assert!(handle.await.is_ok());
-        assert_eq!(*l.lock().await, vec![0usize, 1, 2, 3, 4]);
-    }
-    #[async_std::test]
-    async fn many_nested_children_error() {
-        // Record a side-effect to demonstate that all of these children executed
-        let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(vec![]));
-        let l = log.clone();
-
-        let handle = group(|group| async move {
-            let group2 = group.clone();
-            group.spawn(async move {
-                log.lock().await.push("in root");
-                let group3 = group2.clone();
-                group2.spawn(async move {
-                    log.lock().await.push("in child");
-                    let group4 = group3.clone();
-                    group3.spawn(async move {
-                        log.lock().await.push("in grandchild");
-                        group4.spawn(async move {
-                            log.lock().await.push("in great grandchild");
-                            Err(anyhow!("sooner or later you get a failson"))
-                        });
-                        sleep(Duration::from_secs(1)).await;
-                        // The great-grandchild returning error should terminate this task.
-                        unreachable!("sleepy grandchild should never wake");
-                    });
-                    Ok(())
-                });
-                Ok(())
-            });
-            drop(group);
-            Ok(())
-        });
-        assert_eq!(
-            format!("{:?}", handle.await),
-            "Err(sooner or later you get a failson)"
-        );
-        assert_eq!(
-            *l.lock().await,
-            vec![
-                "in root",
-                "in child",
-                "in grandchild",
-                "in great grandchild"
-            ]
-        );
-    }
     #[async_std::test]
     async fn root_task_errors() {
         let handle = group(|group| async move {
             group.spawn(async { Err(anyhow!("idk!")) });
-            Ok(())
+            Ok(group)
         });
         let res = handle.await;
         assert!(res.is_err());
         assert_eq!(format!("{:?}", res), "Err(idk!)");
-    }
-
-    #[async_std::test]
-    async fn child_task_errors() {
-        let handle = group(|group| async move {
-            group.clone().spawn(async move {
-                group.spawn(async move { Err(anyhow!("whelp")) });
-                Ok(())
-            });
-            Ok(())
-        });
-        let res = handle.await;
-        assert!(res.is_err());
-        assert_eq!(format!("{:?}", res), "Err(whelp)");
-    }
-
-    // #[async_std::test]
-    // async fn root_task_panics() {
-    //     let handle = group(|group| async move {
-    //         group.spawn(async move { panic!("idk!") });
-    //         Ok::<(), ()>(())
-    //     });
-
-    //     let res = handle.await;
-    //     assert!(res.is_err());
-    //     match res.err().unwrap() {
-    //         e => panic!("wrong error variant! {:?}", e),
-    //     }
-    // }
-
-    // #[async_std::test]
-    // async fn child_task_panics() {
-    //     let handle = group(|group| async move {
-    //         let group2 = group.clone();
-    //         group.spawn(async move {
-    //             group2.spawn(async move { panic!("whelp") });
-    //             Ok::<(), ()>(())
-    //         });
-    //         Ok::<(), ()>(())
-    //     });
-
-    //     let res = handle.await;
-    //     assert!(res.is_err());
-    //     match res.err().unwrap() {
-    //         e => panic!("wrong error variant! {:?}", e),
-    //     }
-    // }
-
-    #[async_std::test]
-    async fn child_sleep_no_timeout() {
-        // Record a side-effect to demonstate that all of these children executed
-        let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(vec![]));
-        let l = log.clone();
-        let handle = group(|group| async move {
-            let group2 = group.clone();
-            group.spawn(async move {
-                group2.spawn(async move {
-                    log.lock().await.push("child gonna nap");
-                    sleep(Duration::from_secs(1)).await; // 1 sec sleep, 2 sec timeout
-                    log.lock().await.push("child woke up happy");
-                    Ok(())
-                });
-                Ok(())
-            });
-
-            drop(group); // Not going to launch anymore tasks
-            Ok::<(), ()>(())
-        });
-
-        let res = handle.timeout(Duration::from_secs(2)).await;
-        assert!(res.is_ok(), "no timeout");
-        assert!(res.unwrap().is_ok(), "returned successfully");
-        assert_eq!(
-            *l.lock().await,
-            vec!["child gonna nap", "child woke up happy"]
-        );
-    }
-
-    #[async_std::test]
-    async fn child_sleep_timeout() {
-        let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(vec![]));
-        let l = log.clone();
-
-        let handle = group(|group| async move {
-            let group2 = group.clone();
-            group.spawn(async move {
-                group2.spawn(async move {
-                    log.lock().await.push("child gonna nap");
-                    sleep(Duration::from_secs(2)).await; // 2 sec sleep, 1 sec timeout
-                    unreachable!("child should not wake from this nap");
-                });
-                Ok::<(), ()>(())
-            });
-            Ok(())
-        });
-
-        let res = handle.timeout(Duration::from_secs(1)).await;
-        assert!(res.is_err(), "timed out");
-        assert_eq!(*l.lock().await, vec!["child gonna nap"]);
     }
 }
